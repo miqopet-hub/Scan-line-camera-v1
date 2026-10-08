@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#111">
+<title>Scan Line Camera v1</title>
+<style>
+  :root { color-scheme: dark; font-family: -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#111; color:#eee; min-height:100vh; }
+  main { max-width:900px; margin:auto; padding:16px; padding-bottom:32px; }
+  h1 { font-size:22px; margin:4px 0 2px; font-weight:650; }
+  .sub { color:#999; font-size:13px; margin-bottom:14px; }
+  .stage { position:relative; width:100%; background:#000; border-radius:14px; overflow:hidden; }
+  video { display:block; width:100%; max-height:62vh; object-fit:contain; background:#000; }
+  .scanline { position:absolute; top:0; bottom:0; left:50%; width:2px; transform:translateX(-1px); background:#fff; box-shadow:0 0 8px #fff; pointer-events:none; }
+  .status { position:absolute; left:10px; bottom:10px; padding:6px 9px; border-radius:8px; background:#000b; font:12px ui-monospace,SFMono-Regular,monospace; }
+  .panel { margin-top:14px; padding:14px; border:1px solid #292929; border-radius:14px; background:#171717; }
+  .row { display:flex; justify-content:space-between; gap:12px; align-items:center; margin-bottom:8px; }
+  label { font-size:14px; }
+  output { font:13px ui-monospace,SFMono-Regular,monospace; color:#bbb; }
+  input[type=range] { width:100%; accent-color:#fff; }
+  .buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px; }
+  button { border:0; border-radius:10px; padding:12px; background:#eee; color:#111; font-weight:600; font-size:14px; }
+  button.secondary { background:#292929; color:#eee; }
+  button:disabled { opacity:.4; }
+  .result { margin-top:14px; background:#000; border-radius:14px; overflow:auto; border:1px solid #292929; }
+  canvas { display:block; max-width:100%; height:auto; }
+  .note { font-size:12px; color:#888; line-height:1.45; margin-top:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Scan Line Camera v1</h1>
+  <div class="sub">Center-line sampling experiment for iPhone</div>
+
+  <div class="stage">
+    <video id="video" autoplay muted playsinline></video>
+    <div class="scanline"></div>
+    <div class="status" id="status">Camera off</div>
+  </div>
+
+  <div class="panel">
+    <div class="row"><label for="rate">Scan rate</label><output id="rateOut">30 lines/s</output></div>
+    <input id="rate" type="range" min="1" max="120" value="30">
+
+    <div class="row" style="margin-top:14px"><label for="speed">Virtual movement speed</label><output id="speedOut">1.0×</output></div>
+    <input id="speed" type="range" min="0.1" max="5" value="1" step="0.1">
+
+    <div class="row" style="margin-top:14px"><label for="scale">Spatial scale</label><output id="scaleOut">1.0×</output></div>
+    <input id="scale" type="range" min="0.25" max="4" value="1" step="0.05">
+
+    <div class="buttons">
+      <button id="start">Start camera</button>
+      <button id="scan" class="secondary" disabled>Start scan</button>
+      <button id="pause" class="secondary" disabled>Pause</button>
+      <button id="reset" class="secondary">Reset</button>
+      <button id="save" class="secondary" disabled>Save PNG</button>
+    </div>
+
+    <div class="note">
+      The app samples only the vertical line at the centre of the iPhone camera view.
+      Each sample becomes one vertical strip of the photograph. Scan rate controls how often
+      a line is captured; movement speed controls how far the virtual camera travels between
+      samples. This is a simulation of the future linear-CCD camera, not a true line sensor.
+      Camera access requires HTTPS.
+    </div>
+  </div>
+
+  <div class="result">
+    <canvas id="output" width="1200" height="600"></canvas>
+  </div>
+</main>
+
+<script>
+const video = document.getElementById('video');
+const output = document.getElementById('output');
+const ctx = output.getContext('2d', {willReadFrequently:true});
+const lineCanvas = document.createElement('canvas');
+const lineCtx = lineCanvas.getContext('2d', {willReadFrequently:true});
+
+const rate = document.getElementById('rate');
+const speed = document.getElementById('speed');
+const scale = document.getElementById('scale');
+const rateOut = document.getElementById('rateOut');
+const speedOut = document.getElementById('speedOut');
+const scaleOut = document.getElementById('scaleOut');
+const status = document.getElementById('status');
+const startBtn = document.getElementById('start');
+const scanBtn = document.getElementById('scan');
+const pauseBtn = document.getElementById('pause');
+const resetBtn = document.getElementById('reset');
+const saveBtn = document.getElementById('save');
+
+let stream = null;
+let timer = null;
+let scanning = false;
+let samples = [];
+let virtualPosition = 0;
+let lastSample = 0;
+let maxPosition = 0;
+
+function updateLabels() {
+  rateOut.textContent = rate.value + ' lines/s';
+  speedOut.textContent = Number(speed.value).toFixed(1) + '×';
+  scaleOut.textContent = Number(scale.value).toFixed(2) + '×';
+}
+[rate,speed,scale].forEach(x => x.addEventListener('input', updateLabels));
+updateLabels();
+
+async function startCamera() {
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width:{ideal:1920}, height:{ideal:1080} },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    status.textContent = 'Camera ready';
+    scanBtn.disabled = false;
+    startBtn.textContent = 'Restart camera';
+  } catch (e) {
+    status.textContent = 'Camera permission failed';
+    alert('Camera access failed. Open this page over HTTPS and allow camera access.');
+  }
+}
+
+function prepareCanvas() {
+  const h = Math.max(1, Math.round(video.videoHeight));
+  lineCanvas.width = 1;
+  lineCanvas.height = h;
+  output.width = 1200;
+  output.height = h;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,output.width,output.height);
+}
+
+function takeLine(now) {
+  if (!video.videoWidth || !video.videoHeight) return;
+  lineCtx.drawImage(video, Math.floor(video.videoWidth/2), 0, 1, video.videoHeight, 0, 0, 1, video.videoHeight);
+  const pixels = lineCtx.getImageData(0,0,1,video.videoHeight).data;
+  const copy = new Uint8ClampedArray(pixels);
+  samples.push({position: virtualPosition, pixels: copy});
+  maxPosition = Math.max(maxPosition, virtualPosition);
+  lastSample = now;
+  render();
+}
+
+function render() {
+  if (!samples.length) return;
+  const h = lineCanvas.height;
+  const width = output.width;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,width,h);
+
+  const physicalWidth = Math.max(1, maxPosition);
+  const scalePx = Number(scale.value) * (width / Math.max(1, Math.min(12, physicalWidth)));
+  const first = samples[0].position;
+
+  for (const sample of samples) {
+    const x = Math.round((sample.position - first) * scalePx);
+    if (x < 0 || x >= width) continue;
+    const img = new ImageData(sample.pixels,1,h);
+    ctx.putImageData(img,x,0);
+  }
+  saveBtn.disabled = false;
+}
+
+function startScan() {
+  if (!stream) return;
+  prepareCanvas();
+  samples = [];
+  virtualPosition = 0;
+  maxPosition = 0;
+  scanning = true;
+  scanBtn.disabled = true;
+  pauseBtn.disabled = false;
+  status.textContent = 'Scanning';
+  lastSample = performance.now();
+
+  const loop = () => {
+    if (!scanning) return;
+    const now = performance.now();
+    const dt = Math.max(0, now - lastSample);
+    const hz = Number(rate.value);
+    const interval = 1000 / hz;
+    if (dt >= interval) {
+      virtualPosition += Number(speed.value) * (dt / 1000);
+      takeLine(now);
+    }
+    timer = requestAnimationFrame(loop);
+  };
+  timer = requestAnimationFrame(loop);
+}
+
+function pauseScan() {
+  scanning = false;
+  if (timer) cancelAnimationFrame(timer);
+  scanBtn.disabled = !stream;
+  pauseBtn.disabled = true;
+  status.textContent = 'Paused • ' + samples.length + ' lines';
+}
+
+function reset() {
+  pauseScan();
+  samples = [];
+  virtualPosition = 0;
+  maxPosition = 0;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,output.width,output.height);
+  saveBtn.disabled = true;
+  status.textContent = stream ? 'Camera ready' : 'Camera off';
+}
+
+startBtn.addEventListener('click', startCamera);
+scanBtn.addEventListener('click', startScan);
+pauseBtn.addEventListener('click', pauseScan);
+resetBtn.addEventListener('click', reset);
+
+saveBtn.addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.download = 'scan-line-photo.png';
+  a.href = output.toDataURL('image/png');
+  a.click();
+});
+</script>
+</body>
+</html>
