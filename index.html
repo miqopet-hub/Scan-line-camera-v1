@@ -99,7 +99,7 @@ let scanning = false;
 let samples = [];
 let virtualPosition = 0;
 let lastSample = 0;
-let maxPosition = 0;
+let maxPosition = 0;\nlet outputWidth = 0;
 
 function updateLabels() {
   rateOut.textContent = rate.value + ' lines/s';
@@ -131,10 +131,11 @@ function prepareCanvas() {
   const h = Math.max(1, Math.round(video.videoHeight));
   lineCanvas.width = 1;
   lineCanvas.height = h;
-  output.width = 1200;
+  outputWidth = 0;
+  output.width = 1;
   output.height = h;
   ctx.fillStyle = '#000';
-  ctx.fillRect(0,0,output.width,output.height);
+  ctx.fillRect(0,0,1,h);
 }
 
 function takeLine(now) {
@@ -155,13 +156,23 @@ function render() {
   ctx.fillStyle = '#000';
   ctx.fillRect(0,0,width,h);
 
-  const physicalWidth = Math.max(1, maxPosition);
-  const scalePx = Number(scale.value) * (width / Math.max(1, Math.min(12, physicalWidth)));
   const first = samples[0].position;
+  const scalePx = Number(scale.value) * 100;
+  const requiredWidth = Math.max(1, Math.ceil((maxPosition - first) * scalePx) + 1);
+
+  if (requiredWidth !== outputWidth) {
+    const old = ctx.getImageData(0, 0, Math.min(outputWidth || 1, requiredWidth), h);
+    output.width = requiredWidth;
+    output.height = h;
+    outputWidth = requiredWidth;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,requiredWidth,h);
+    if (old.width > 0) ctx.putImageData(old,0,0);
+  }
 
   for (const sample of samples) {
     const x = Math.round((sample.position - first) * scalePx);
-    if (x < 0 || x >= width) continue;
+    if (x < 0 || x >= output.width) continue;
     const img = new ImageData(sample.pixels,1,h);
     ctx.putImageData(img,x,0);
   }
@@ -208,8 +219,10 @@ function reset() {
   samples = [];
   virtualPosition = 0;
   maxPosition = 0;
+  outputWidth = 1;
+  output.width = 1;
   ctx.fillStyle = '#000';
-  ctx.fillRect(0,0,output.width,output.height);
+  ctx.fillRect(0,0,1,output.height);
   saveBtn.disabled = true;
   status.textContent = stream ? 'Camera ready' : 'Camera off';
 }
