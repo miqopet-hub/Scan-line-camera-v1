@@ -113,8 +113,11 @@ function onLineReceived(lineData) {
   }
 
   const x = lineCount;
+  // Canvas resizing clears it, so preserve the existing image before adding one line.
+  const previous = lineCount > 0 ? ctx.getImageData(0, 0, lineCount, h) : null;
   output.width = lineCount + 1;
   output.height = h;
+  if (previous) ctx.putImageData(previous, 0, 0);
 
   const img = new ImageData(lineData.pixels, 1, h);
   ctx.putImageData(img, x, 0);
