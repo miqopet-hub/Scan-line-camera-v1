@@ -265,11 +265,52 @@ scanBtn.addEventListener('click', startScan);
 pauseBtn.addEventListener('click', pauseScan);
 resetBtn.addEventListener('click', reset);
 
-saveBtn.addEventListener('click', () => {
-  const a = document.createElement('a');
-  a.download = 'scan-line-photo.png';
-  a.href = output.toDataURL('image/png');
-  a.click();
+saveBtn.addEventListener('click', async () => {
+  if (!lineCount) {
+    alert('There are no scan lines to save yet. Start a scan first.');
+    return;
+  }
+
+  saveBtn.disabled = true;
+  status.textContent = 'Preparing PNG…';
+
+  try {
+    const blob = await new Promise((resolve, reject) => {
+      output.toBlob(file => file ? resolve(file) : reject(new Error('PNG export failed')), 'image/png');
+    });
+    const file = new File([blob], 'scan-line-photo.png', { type: 'image/png' });
+
+    // iPhone/iPad Safari supports the share sheet, which lets users save to Files.
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'Scan line photo' });
+      status.textContent = 'PNG ready to share or save';
+    } else {
+      // Desktop browsers and other browsers can use the normal download flow.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'scan-line-photo.png';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      // If downloads are unsupported, open the PNG so it can be saved from the browser.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      status.textContent = 'PNG export requested';
+    }
+  } catch (e) {
+    // Canceling the iOS share sheet is not an export failure.
+    if (e && e.name === 'AbortError') {
+      status.textContent = 'Save cancelled';
+    } else {
+      console.error(e);
+      status.textContent = 'PNG export failed';
+      alert('Could not export the PNG. Try a shorter scan, then save again.');
+    }
+  } finally {
+    saveBtn.disabled = lineCount === 0;
+  }
 });
 </script>
 </body>
