@@ -42,8 +42,8 @@
   </div>
 
   <div class="panel">
-    <div class="row"><label for="rate">Scan rate</label><output id="rateOut">30 lines/s</output></div>
-    <input id="rate" type="range" min="1" max="120" value="30">
+    <div class="row"><label for="rate">Requested scan rate</label><output id="rateOut">30 lines/s</output></div>
+    <input id="rate" type="range" min="1" max="1000" value="30">
 
     <div class="buttons">
       <button id="start">Start camera</button>
@@ -57,9 +57,10 @@
       The preview shows the normal camera view only for visualization. The white vertical line is the
       active one-dimensional scan line. Every received sensor line is appended directly beside the previous
       line. There is no physical-position, movement-speed, interpolation, or resampling logic in the
-      reconstruction. Scan rate is the simulated fixed line-acquisition rate. The eventual hardware can
-      provide one TCD1304-style line at a time, independently of its electronic integration time.
-      Camera access requires HTTPS.
+      reconstruction. The slider sets the requested line-acquisition rate. In this iPhone browser prototype,
+      actual acquisition is limited by browser scheduling and the camera video frame rate; selecting 1000
+      does not guarantee 1000 distinct camera lines per second. The eventual hardware can provide one
+      TCD1304-style line at a time, independently of its electronic integration time. Camera access requires HTTPS.
     </div>
   </div>
 
