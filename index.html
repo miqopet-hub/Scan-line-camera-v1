@@ -25,8 +25,8 @@
   button { border:0; border-radius:10px; padding:12px; background:#eee; color:#111; font-weight:600; font-size:14px; }
   button.secondary { background:#292929; color:#eee; }
   button:disabled { opacity:.4; }
-  .result { margin-top:14px; background:#000; border-radius:14px; overflow:auto; border:1px solid #292929; }
-  canvas { display:block; max-width:100%; height:auto; }
+  .result { margin-top:14px; background:#000; border-radius:14px; overflow:auto; border:1px solid #292929; display:flex; align-items:flex-start; gap:0; min-height:120px; }
+  .result canvas { display:block; flex:none; max-width:none; height:600px; width:auto; }
   .note { font-size:12px; color:#888; line-height:1.45; margin-top:12px; }
 </style>
 </head>
@@ -59,36 +59,42 @@
       line. There is no physical-position, movement-speed, interpolation, or resampling logic in the
       reconstruction. The slider sets the requested line-acquisition rate. In this iPhone browser prototype,
       actual acquisition is limited by browser scheduling and the camera video frame rate; selecting 1000
-      does not guarantee 1000 distinct camera lines per second. The eventual hardware can provide one
-      TCD1304-style line at a time, independently of its electronic integration time. Camera access requires HTTPS.
+      does not guarantee 1000 distinct camera lines per second. Image data is stored in fixed-width chunks,
+      so the app does not resize and recopy the entire image for every new line. Very long captures remain
+      limited by available device memory. Wide captures export as multiple numbered PNG sections.
+      Camera access requires HTTPS.
     </div>
   </div>
 
-  <div class="result">
-    <canvas id="output" width="1" height="600"></canvas>
-  </div>
+  <div class="row" style="margin-top:14px"><label>Captured image</label><output id="dimensions">0 × 0 px</output></div>
+  <div class="result" id="output" aria-label="Growing scan image"></div>
 </main>
 
 <script>
 const video = document.getElementById('video');
 const output = document.getElementById('output');
-const ctx = output.getContext('2d', {willReadFrequently:true});
 const lineCanvas = document.createElement('canvas');
 const lineCtx = lineCanvas.getContext('2d', {willReadFrequently:true});
 
 const rate = document.getElementById('rate');
 const rateOut = document.getElementById('rateOut');
 const status = document.getElementById('status');
+const dimensions = document.getElementById('dimensions');
 const startBtn = document.getElementById('start');
 const scanBtn = document.getElementById('scan');
 const pauseBtn = document.getElementById('pause');
 const resetBtn = document.getElementById('reset');
 const saveBtn = document.getElementById('save');
 
+const CHUNK_WIDTH = 1024;
+const SINGLE_PNG_MAX_WIDTH = 8192;
 let stream = null;
 let timer = null;
 let scanning = false;
 let lineCount = 0;
+let imageHeight = 0;
+let chunks = [];
+let currentChunk = null;
 let lastSample = 0;
 
 function updateLabels() {
@@ -97,67 +103,73 @@ function updateLabels() {
 rate.addEventListener('input', updateLabels);
 updateLabels();
 
+function updateDimensions() {
+  dimensions.textContent = lineCount + ' × ' + (imageHeight || 0) + ' px';
+}
+
+function createChunk(h) {
+  const canvas = document.createElement('canvas');
+  canvas.width = CHUNK_WIDTH;
+  canvas.height = h;
+  canvas.setAttribute('aria-label', 'Image section ' + (chunks.length + 1));
+  output.appendChild(canvas);
+  currentChunk = { canvas, context: canvas.getContext('2d', {willReadFrequently:false}), used: 0 };
+  chunks.push(currentChunk);
+}
+
 /*
  * Reconstruction boundary.
- * The engine receives exactly one complete 1D line and appends it.
- * It deliberately knows nothing about camera position, rail movement,
- * distance, acceleration, or any other physical coordinate.
+ * Every received 1D line is appended in order. The image is held in
+ * fixed-width chunks, so adding a line never resizes or recopies prior
+ * image data. This layer has no knowledge of rail position or movement.
  */
 function onLineReceived(lineData) {
   if (!lineData || !lineData.pixels || !lineData.height) return;
-
   const h = lineData.height;
-  if (lineCanvas.height !== h) {
-    lineCanvas.width = 1;
-    lineCanvas.height = h;
+
+  if (imageHeight !== h) {
+    if (lineCount > 0) return;
     prepareOutput(h);
   }
+  if (!currentChunk || currentChunk.used >= CHUNK_WIDTH) createChunk(h);
 
-  const x = lineCount;
-  // Canvas resizing clears it, so preserve the existing image before adding one line.
-  const previous = lineCount > 0 ? ctx.getImageData(0, 0, lineCount, h) : null;
-  output.width = lineCount + 1;
-  output.height = h;
-  if (previous) ctx.putImageData(previous, 0, 0);
-
-  const img = new ImageData(lineData.pixels, 1, h);
-  ctx.putImageData(img, x, 0);
-
+  const pixels = lineData.pixels instanceof Uint8ClampedArray
+    ? lineData.pixels
+    : new Uint8ClampedArray(lineData.pixels);
+  const img = new ImageData(pixels, 1, h);
+  currentChunk.context.putImageData(img, currentChunk.used, 0);
+  currentChunk.used += 1;
   lineCount += 1;
+
+  if (lineCount % 30 === 0) {
+    updateDimensions();
+    if (scanning) status.textContent = 'Scanning • ' + lineCount.toLocaleString() + ' lines';
+  }
   saveBtn.disabled = false;
 }
 
 function prepareOutput(h) {
-  output.width = 1;
-  output.height = h;
+  output.replaceChildren();
+  chunks = [];
+  currentChunk = null;
   lineCount = 0;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, 1, h);
+  imageHeight = h;
+  updateDimensions();
+  saveBtn.disabled = true;
 }
 
 function readCameraLine() {
   if (!video.videoWidth || !video.videoHeight) return null;
-
   lineCtx.drawImage(
     video,
     Math.floor(video.videoWidth / 2), 0, 1, video.videoHeight,
     0, 0, 1, video.videoHeight
   );
-
   const pixels = lineCtx.getImageData(0, 0, 1, video.videoHeight).data;
-  return {
-    pixels: new Uint8ClampedArray(pixels),
-    height: video.videoHeight
-  };
+  return { pixels: new Uint8ClampedArray(pixels), height: video.videoHeight };
 }
 
-/*
- * Simulator/input adapter.
- * The current browser prototype gets a 1D line from the preview.
- * Future hardware can call onLineReceived() directly with a TCD1304
- * line received over USB. Integration/exposure timing belongs to the
- * sensor acquisition layer, not this reconstruction layer.
- */
+/* Future linear-CCD input can call onLineReceived() directly. */
 function acquireOneLine() {
   const lineData = readCameraLine();
   if (lineData) onLineReceived(lineData);
@@ -165,18 +177,14 @@ function acquireOneLine() {
 
 async function startCamera() {
   try {
-    if (!window.isSecureContext) {
-      throw new Error('Camera requires HTTPS.');
-    }
+    if (!window.isSecureContext) throw new Error('Camera requires HTTPS.');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('Camera API is unavailable in this browser.');
     }
-
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
       stream = null;
     }
-
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'environment' },
@@ -185,7 +193,6 @@ async function startCamera() {
       },
       audio: false
     });
-
     video.srcObject = stream;
     await video.play();
 
@@ -206,33 +213,23 @@ async function startCamera() {
 }
 
 function startScan() {
-  if (!stream || !video.videoWidth || !video.videoHeight) return;
-
-  if (scanning) return;
-
+  if (!stream || !video.videoWidth || !video.videoHeight || scanning) return;
   scanning = true;
   scanBtn.disabled = true;
   pauseBtn.disabled = false;
   status.textContent = 'Scanning';
 
-  const now = performance.now();
-  lastSample = now;
-
+  lastSample = performance.now();
   const loop = (timestamp) => {
     if (!scanning) return;
-
     const hz = Math.max(1, Number(rate.value));
     const interval = 1000 / hz;
-
     if (timestamp - lastSample >= interval) {
-      // One acquisition event produces exactly one output line.
       acquireOneLine();
       lastSample = timestamp;
     }
-
     timer = requestAnimationFrame(loop);
   };
-
   timer = requestAnimationFrame(loop);
 }
 
@@ -242,22 +239,18 @@ function pauseScan() {
     cancelAnimationFrame(timer);
     timer = null;
   }
-
   scanBtn.disabled = !stream;
   pauseBtn.disabled = true;
-  status.textContent = 'Paused • ' + lineCount + ' lines';
+  updateDimensions();
+  status.textContent = 'Paused • ' + lineCount.toLocaleString() + ' lines';
 }
 
 function reset() {
   pauseScan();
-  lineCount = 0;
-
   const h = video.videoHeight || lineCanvas.height || 1;
   lineCanvas.width = 1;
   lineCanvas.height = h;
   prepareOutput(h);
-
-  saveBtn.disabled = true;
   status.textContent = stream ? 'Camera ready' : 'Camera off';
 }
 
@@ -266,48 +259,77 @@ scanBtn.addEventListener('click', startScan);
 pauseBtn.addEventListener('click', pauseScan);
 resetBtn.addEventListener('click', reset);
 
+function canvasToBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('PNG export failed')), 'image/png');
+  });
+}
+
+async function buildExportFiles() {
+  if (lineCount <= SINGLE_PNG_MAX_WIDTH) {
+    const combined = document.createElement('canvas');
+    combined.width = lineCount;
+    combined.height = imageHeight;
+    const c = combined.getContext('2d');
+    let x = 0;
+    for (const chunk of chunks) {
+      const width = chunk.used;
+      c.drawImage(chunk.canvas, 0, 0, width, imageHeight, x, 0, width, imageHeight);
+      x += width;
+    }
+    const blob = await canvasToBlob(combined);
+    return [new File([blob], 'scan-line-photo.png', {type:'image/png'})];
+  }
+
+  const files = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const tile = document.createElement('canvas');
+    tile.width = chunk.used;
+    tile.height = imageHeight;
+    tile.getContext('2d').drawImage(chunk.canvas, 0, 0, chunk.used, imageHeight, 0, 0, chunk.used, imageHeight);
+    const blob = await canvasToBlob(tile);
+    files.push(new File([blob], 'scan-line-photo-part-' + String(i + 1).padStart(4, '0') + '.png', {type:'image/png'}));
+    tile.width = 1;
+    tile.height = 1;
+  }
+  return files;
+}
+
 saveBtn.addEventListener('click', async () => {
   if (!lineCount) {
     alert('There are no scan lines to save yet. Start a scan first.');
     return;
   }
-
   saveBtn.disabled = true;
-  status.textContent = 'Preparing PNG…';
-
+  status.textContent = 'Preparing PNG export…';
   try {
-    const blob = await new Promise((resolve, reject) => {
-      output.toBlob(file => file ? resolve(file) : reject(new Error('PNG export failed')), 'image/png');
-    });
-    const file = new File([blob], 'scan-line-photo.png', { type: 'image/png' });
-
-    // iPhone/iPad Safari supports the share sheet, which lets users save to Files.
-    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file], title: 'Scan line photo' });
-      status.textContent = 'PNG ready to share or save';
+    const files = await buildExportFiles();
+    if (navigator.share && navigator.canShare && navigator.canShare({files})) {
+      await navigator.share({files, title:'Scan line photo'});
+      status.textContent = files.length === 1 ? 'PNG ready to share or save' : files.length + ' PNG sections ready to share or save';
     } else {
-      // Desktop browsers and other browsers can use the normal download flow.
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'scan-line-photo.png';
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      // If downloads are unsupported, open the PNG so it can be saved from the browser.
-      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
-      status.textContent = 'PNG export requested';
+      for (const file of files) {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      status.textContent = files.length === 1 ? 'PNG export requested' : files.length + ' PNG sections exported';
     }
   } catch (e) {
-    // Canceling the iOS share sheet is not an export failure.
     if (e && e.name === 'AbortError') {
       status.textContent = 'Save cancelled';
     } else {
       console.error(e);
       status.textContent = 'PNG export failed';
-      alert('Could not export the PNG. Try a shorter scan, then save again.');
+      alert('Could not export the image. Try a shorter capture or export on a device with more memory.');
     }
   } finally {
     saveBtn.disabled = lineCount === 0;
