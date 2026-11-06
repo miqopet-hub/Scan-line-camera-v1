@@ -43,7 +43,7 @@
 
   <div class="panel">
     <div class="row"><label for="rate">Requested scan rate</label><output id="rateOut">30 lines/s</output></div>
-    <input id="rate" type="range" min="1" max="1000" value="30">
+    <input id="rate" type="range" min="1" max="60" value="30">
 
     <div class="buttons">
       <button id="start">Start camera</button>
@@ -58,8 +58,8 @@
       active one-dimensional scan line. Every received sensor line is appended directly beside the previous
       line. There is no physical-position, movement-speed, interpolation, or resampling logic in the
       reconstruction. The slider sets the requested line-acquisition rate. In this iPhone browser prototype,
-      actual acquisition is limited by browser scheduling and the camera video frame rate; selecting 1000
-      does not guarantee 1000 distinct camera lines per second. Image data is stored in fixed-width chunks,
+      The app requests up to 120 FPS from the camera, but the browser/device decides what is available.
+      The scan-rate slider is capped to the reported camera frame rate (up to 120 FPS). Image data is stored in fixed-width chunks,
       so the app does not resize and recopy the entire image for every new line. Very long captures remain
       limited by available device memory. Wide captures export as multiple numbered PNG sections.
       Camera access requires HTTPS.
@@ -96,6 +96,8 @@ let imageHeight = 0;
 let chunks = [];
 let currentChunk = null;
 let lastSample = 0;
+let cameraFrameRate = 60;
+let videoFrameCallbackId = null;
 
 function updateLabels() {
   rateOut.textContent = rate.value + ' lines/s';
@@ -189,7 +191,8 @@ async function startCamera() {
       video: {
         facingMode: { ideal: 'environment' },
         width: { ideal: 1920 },
-        height: { ideal: 1080 }
+        height: { ideal: 1080 },
+        frameRate: { ideal: 120 }
       },
       audio: false
     });
@@ -201,7 +204,14 @@ async function startCamera() {
     lineCanvas.height = h;
     prepareOutput(h);
 
-    status.textContent = 'Camera ready';
+    const track = stream.getVideoTracks()[0];
+    const reportedRate = track && track.getSettings ? track.getSettings().frameRate : 0;
+    cameraFrameRate = Math.max(1, Math.min(120, Math.round(reportedRate || 60)));
+    rate.max = String(cameraFrameRate);
+    if (Number(rate.value) > cameraFrameRate) rate.value = String(cameraFrameRate);
+    updateLabels();
+
+    status.textContent = 'Camera ready • ' + cameraFrameRate + ' FPS';
     scanBtn.disabled = false;
     startBtn.textContent = 'Restart camera';
   } catch (e) {
@@ -217,20 +227,36 @@ function startScan() {
   scanning = true;
   scanBtn.disabled = true;
   pauseBtn.disabled = false;
-  status.textContent = 'Scanning';
+  status.textContent = 'Scanning • camera ' + cameraFrameRate + ' FPS';
 
-  lastSample = performance.now();
-  const loop = (timestamp) => {
-    if (!scanning) return;
-    const hz = Math.max(1, Number(rate.value));
-    const interval = 1000 / hz;
-    if (timestamp - lastSample >= interval) {
-      acquireOneLine();
-      lastSample = timestamp;
-    }
+  lastSample = 0;
+  const hz = Math.min(cameraFrameRate, Math.max(1, Number(rate.value)));
+  const interval = 1000 / hz;
+
+  // Prefer callbacks tied to actual decoded video frames. This avoids
+  // sampling the same displayed frame repeatedly just because the screen
+  // refresh loop ran more often than the camera.
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    const onVideoFrame = (now) => {
+      if (!scanning) return;
+      if (!lastSample || now - lastSample >= interval) {
+        acquireOneLine();
+        lastSample = now;
+      }
+      videoFrameCallbackId = video.requestVideoFrameCallback(onVideoFrame);
+    };
+    videoFrameCallbackId = video.requestVideoFrameCallback(onVideoFrame);
+  } else {
+    const loop = (timestamp) => {
+      if (!scanning) return;
+      if (!lastSample || timestamp - lastSample >= interval) {
+        acquireOneLine();
+        lastSample = timestamp;
+      }
+      timer = requestAnimationFrame(loop);
+    };
     timer = requestAnimationFrame(loop);
-  };
-  timer = requestAnimationFrame(loop);
+  }
 }
 
 function pauseScan() {
@@ -238,6 +264,10 @@ function pauseScan() {
   if (timer !== null) {
     cancelAnimationFrame(timer);
     timer = null;
+  }
+  if (videoFrameCallbackId !== null && video.cancelVideoFrameCallback) {
+    video.cancelVideoFrameCallback(videoFrameCallbackId);
+    videoFrameCallbackId = null;
   }
   scanBtn.disabled = !stream;
   pauseBtn.disabled = true;
